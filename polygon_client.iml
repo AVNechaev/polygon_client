@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<module type="ERLANG_MODULE" version="4">
+  <component name="FacetManager">
+    <facet type="erlang" name="Erlang">
+      <configuration />
+    </facet>
+  </component>
+  <component name="NewModuleRootManager">
+    <output url="file://$MODULE_DIR$/../rz_server/_checkouts/polygon_client/ebin" />
+    <output-test url="file://$MODULE_DIR$/../rz_server/_checkouts/polygon_client/.eunit" />
+    <exclude-output />
+    <content url="file://$MODULE_DIR$/../rz_server/_checkouts/polygon_client">
+      <sourceFolder url="file://$MODULE_DIR$/../rz_server/_checkouts/polygon_client/src" isTestSource="false" />
+      <excludeFolder url="file://$MODULE_DIR$/.rebar3" />
+      <excludeFolder url="file://$MODULE_DIR$/_build" />
+    </content>
+    <orderEntry type="inheritedJdk" />
+    <orderEntry type="sourceFolder" forTests="false" />
+    <orderEntry type="module" module-name="lager" />
+    <orderEntry type="module" module-name="gun" />
+    <orderEntry type="module" module-name="jiffy" />
+    <orderEntry type="module" module-name="rz_util" />
+  </component>
+</module>

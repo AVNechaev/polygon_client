@@ -1,0 +1,17 @@
+{application, polygon_client,
+ [{description, "Polygon.io WS client library"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {applications,
+   [kernel,
+    stdlib,
+    gun,
+    jiffy,
+    lager
+   ]},
+  {env,[]},
+  {modules, []},
+
+  {maintainers, []},
+  {links, []}
+ ]}.
