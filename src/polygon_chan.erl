@@ -37,6 +37,7 @@ last_price => float()
 -record(state, {
   conn_id :: pid(),
   tick_fun :: tick_fun(),
+  timestamp_offset :: non_neg_integer(),
   last_subscribe :: calendar:datetime(),
   ticks_since_last_subscribe = 0 :: non_neg_integer()
 }).
@@ -56,22 +57,32 @@ init([TickFun]) ->
   Addr = rz_util:get_env(polygon_client, ws_addr),
   Port = rz_util:get_env(polygon_client, ws_port),
   Enabled = rz_util:get_env(polygon_client, enabled),
+  TimestampOffset = calendar:datetime_to_gregorian_seconds({{1970, 1, 1}, {0, 0, 0}}),
   case Enabled of
     true ->
       lager:info("Polygon.io client enabled."),
       {ok, ConnPid} = gun:open(Addr, Port, #{transport => ssl, protocols => [http]}),
-      {ok, #state{conn_id = ConnPid, tick_fun = TickFun}};
+      {ok, #state{conn_id = ConnPid, tick_fun = TickFun, timestamp_offset = TimestampOffset}};
     _ ->
       lager:info("Polygon.io client disabled."),
-      {ok, #state{conn_id = undefined, tick_fun = undefined}}
+      {ok, #state{conn_id = undefined, tick_fun = undefined, timestamp_offset = TimestampOffset}}
   end.
 
 %%--------------------------------------------------------------------
 handle_info({gun_up, _, http}, State) -> do_upgrade_chan(State);
-handle_info({gun_ws_upgrade, _, _, _}, State) -> do_auth(State);
-handle_info({gun_ws, _, Msg}, State) -> do_message(Msg, State);
+handle_info({gun_ws_upgrade, _, _, _}, State) -> {noreply, State};
+handle_info({gun_ws, _, {text, Data}}, State) ->
+  case catch jiffy:decode(Data, [return_maps]) of
+    MapMsg when is_map(MapMsg) ->
+      do_message(MapMsg, State);
+    MsgList when is_list(MsgList) ->
+      lists:foldr(fun(M, {noreply, St}) -> do_message(M, St) end, {noreply, State}, MsgList);
+    Else ->
+      lager:warning("cannot decode Polygon message: ~p, ~p", [Data, Else]),
+      {noreply, State}
+  end;
 handle_info(Other, State) ->
-  lager:info("Polygon.in msg: ~p", [Other]),
+  lager:warning("unexpected websocket  msg: ~p", [Other]),
   {noreply, State}.
 
 %%--------------------------------------------------------------------
@@ -88,46 +99,39 @@ do_upgrade_chan(State = #state{conn_id = ConnId}) ->
   {noreply, State}.
 
 %%--------------------------------------------------------------------
-do_auth(State = #state{conn_id = ConnId}) ->
-  gun:ws_send(ConnId, {text, auth_msg()}),
-  {noreply, State#state{last_subscribe = erlang:localtime(), ticks_since_last_subscribe = 0}}.
-
-%%--------------------------------------------------------------------
-%%do_message({text, Data}, State = #state{tick_fun = TF, ticks_since_last_subscribe = TickCnt}) ->
-%%  case jiffy:decode(Data, [return_maps]) of
-%%    #{
-%%      <<"type">> := <<"ticker">>,
-%%      <<"product_id">> := Pair,
-%%      <<"price">> := Price,
-%%      <<"time">> := Time} ->
-%%      TF(#{instr => bin2instr(Pair), last_price => bin2float(Price), time => bin2time(Time)});
-%%    _ ->
-%%      ok
-%%  end,
-%%  {noreply, State#state{ticks_since_last_subscribe = TickCnt + 1}};
-%%%%---
+do_message(#{<<"ev">> := <<"status">>, <<"status">> := <<"connected">>}, State) ->
+  lager:info("Connected to Polygon.io"),
+  gun:ws_send(State#state.conn_id, {text, auth_msg()}),
+  {noreply, State#state{last_subscribe = erlang:localtime(), ticks_since_last_subscribe = 0}};
+do_message(#{<<"ev">> := <<"status">>, <<"status">> := <<"auth_success">>}, State) ->
+  lager:info("Polygon connection authenticated"),
+  gun:ws_send(State#state.conn_id, {text, subscribe_msg()}),
+  {noreply, State};
+do_message(#{<<"ev">> := <<"C">>, <<"p">> := Pair, <<"b">> := Bid, <<"a">> := _Ask, <<"t">> := Timestamp}, State = #state{ticks_since_last_subscribe = TickCnt, tick_fun = TF}) ->
+  TF(#{instr => bin2instr(Pair), last_price => bin2float(Bid), time => bin2time(Timestamp, State)}),
+  {noreply, State#state{ticks_since_last_subscribe = TickCnt + 1}};
 do_message(Other, State) ->
-  lager:info("UNEXPECTED Polygon.io MSG: ~p", [Other]),
+  lager:debug("Got unprocessed Polygon msg: ~p", [Other]),
   {noreply, State}.
 
 %%--------------------------------------------------------------------
-%%bin2time(<<Y:4/binary,$-,M:2/binary,$-,D:2/binary,$T,H:2/binary,$:,Mi:2/binary,$:,S:2/binary, _/binary>>) ->
-%%  DateTime = {
-%%    {binary_to_integer(Y), binary_to_integer(M), binary_to_integer(D)},
-%%    {binary_to_integer(H), binary_to_integer(Mi), binary_to_integer(S)}
-%%  },
-%%  calendar:datetime_to_gregorian_seconds(DateTime).
+
 
 %%--------------------------------------------------------------------
-bin2instr(<<F:3/binary, _, S:3/binary>>) -> <<F/binary, S/binary>>.
+bin2time(TS, #state{timestamp_offset = Offset}) when is_integer(TS) -> Offset + (TS div 1000);
+bin2time(TSBin, State) when is_binary(TSBin)-> bin2time(binary_to_integer(TSBin), State).
 
 %%--------------------------------------------------------------------
-%%bin2float(Bin) ->
-%%  try
-%%    binary_to_float(Bin)
-%%  catch _:_ ->
-%%    float(binary_to_integer(Bin))
-%%  end.
+bin2instr(<<F:3/binary, _, S:3/binary>>) -> <<F/binary, S/binary, ".FXCM">>.
+
+%%--------------------------------------------------------------------
+bin2float(F) when is_float(F)-> F;
+bin2float(Bin) ->
+  try
+    binary_to_float(Bin)
+  catch _:_ ->
+    float(binary_to_integer(Bin))
+  end.
 
 %%--------------------------------------------------------------------
 auth_msg() ->
@@ -140,5 +144,20 @@ auth_msg() ->
       \"params\": \"", APIKey,
       "\"
     }"
+    ]
+  ).
+
+%%--------------------------------------------------------------------
+subscribe_msg() ->
+  Currencies = rz_util:get_env(polygon_client, currencies),
+  TrFun = fun(<<F:3/binary, S:3/binary, ".FXCM">>) -> <<"C.", F/binary, "/", S/binary>> end,
+  <<_,Text/binary>> = iolist_to_binary([[",", TrFun(C)] || C <- Currencies]),
+  iolist_to_binary(
+    [
+      "{
+      \"action\": \"subscribe\",
+      \"params\": \"", Text,
+      "\"
+      }"
     ]
   ).
